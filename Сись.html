@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GIF</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            background: #000;
+        }
+
+        #canvas,
+        #gif {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            cursor: pointer;
+        }
+
+        #gif {
+            display: none;
+        }
+
+        /* картинка, которая выскакивает по клику на область */
+        #popup {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            max-width: 50vw;
+            max-height: 50vh;
+            z-index: 5;
+            display: none;
+            pointer-events: none;
+            /* клики проходят сквозь неё */
+        }
+
+        /* подсказка с координатами, чтобы находить нужные места */
+        #debug {
+            position: fixed;
+            top: 8px;
+            left: 8px;
+            z-index: 20;
+            padding: 4px 8px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #0f0;
+            font: 14px monospace;
+            pointer-events: none;
+        }
+
+        .nav {
+            position: fixed;
+            top: 50%;
+            transform: translateY(-50%);
+            z-index: 10;
+            border: none;
+            background: rgba(255, 255, 255, 0.2);
+            color: #fff;
+            font-size: 32px;
+            width: 48px;
+            height: 72px;
+            cursor: pointer;
+        }
+
+        .nav:hover {
+            background: rgba(255, 255, 255, 0.4);
+        }
+
+        #prev {
+            left: 8px;
+        }
+
+        #next {
+            right: 8px;
+        }
+
+        .nav[hidden] {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="canvas"></canvas>
+    <img id="gif" alt="">
+    <img id="popup" alt="">
+    <div id="debug">клик: x=–, y=–</div>
+    <button class="nav" id="prev" aria-label="Назад">‹</button>
+    <button class="nav" id="next" aria-label="Вперёд">›</button>
+
+    <script>
+        const DEBUG = false; // поставь false, когда найдёшь нужные координаты
+
+        // x, y — левый верхний угол области, w, h — её размер.
+        // Всё в долях от гифки: 0 — левый/верхний край, 1 — правый/нижний.
+        const SLIDES = [
+            {
+                url: "1.gif", frame: 0, duration: 1000,
+                spots: [
+                    { x: 0.70, y: 0.41, w: 0.20, h: 0.20, img: "putin.jpg", time: 1000 }
+                ]
+            },
+            {
+                url: "2.gif", frame: 0, duration: 1000,
+                spots: [
+                    { x: 0.32, y: 0.60, w: 0.25, h: 0.25, img: "putin.jpg", time: 1000 }
+                ]
+            }
+        ];
+
+        const canvas = document.getElementById("canvas");
+        const gif = document.getElementById("gif");
+        const popup = document.getElementById("popup");
+        const debugBox = document.getElementById("debug");
+        const prevBtn = document.getElementById("prev");
+        const nextBtn = document.getElementById("next");
+        const ctx = canvas.getContext("2d");
+
+        debugBox.style.display = DEBUG ? "block" : "none";
+
+        let current = 0;
+        let playing = false;
+        let timer = null;
+        let popupTimer = null;
+        let token = 0; // защита от гонки при быстром листании
+
+        function drawFirstFrame(url, myToken) {
+            const img = new Image();
+            img.onload = () => {
+                if (myToken !== token) return;
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                ctx.drawImage(img, 0, 0);
+            };
+            img.src = url;
+        }
+
+        async function drawChosenFrame(slide, myToken) {
+            if (!("ImageDecoder" in window)) {
+                drawFirstFrame(slide.url, myToken);
+                return;
+            }
+            try {
+                const res = await fetch(slide.url);
+                const decoder = new ImageDecoder({ data: res.body, type: "image/gif" });
+                await decoder.tracks.ready;
+                const count = decoder.tracks.selectedTrack.frameCount;
+                const index = Math.min(slide.frame, count - 1);
+                const { image } = await decoder.decode({ frameIndex: index });
+                if (myToken === token) {
+                    canvas.width = image.displayWidth;
+                    canvas.height = image.displayHeight;
+                    ctx.drawImage(image, 0, 0);
+                }
+                image.close();
+            } catch (e) {
+                drawFirstFrame(slide.url, myToken);
+            }
+        }
+
+        // Переводим клик по экрану в координаты гифки (0..1) с учётом object-fit: cover
+        function toImageCoords(clientX, clientY) {
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            const scale = Math.max(vw / canvas.width, vh / canvas.height);
+            const w = canvas.width * scale;
+            const h = canvas.height * scale;
+            const offsetX = (vw - w) / 2;
+            const offsetY = (vh - h) / 2;
+            return {
+                x: (clientX - offsetX) / w,
+                y: (clientY - offsetY) / h
+            };
+        }
+
+        function hidePopup() {
+            clearTimeout(popupTimer);
+            popup.style.display = "none";
+        }
+
+        function showPopup(spot) {
+            clearTimeout(popupTimer);
+            popup.src = spot.img;
+            popup.style.display = "block";
+            popupTimer = setTimeout(hidePopup, spot.time || 1000);
+        }
+
+        function show(index) {
+            current = index;
+            token++;
+
+            // сбрасываем возможное проигрывание и всплывшую картинку
+            clearTimeout(timer);
+            hidePopup();
+            gif.onload = null;
+            gif.style.display = "none";
+            canvas.style.display = "block";
+            playing = false;
+
+            prevBtn.hidden = current === 0;
+            nextBtn.hidden = current === SLIDES.length - 1;
+
+            drawChosenFrame(SLIDES[current], token);
+        }
+
+        function go(step) {
+            const next = current + step;
+            if (next < 0 || next >= SLIDES.length) return;
+            show(next);
+        }
+
+        function playGif() {
+            if (playing) return;
+            playing = true;
+            const slide = SLIDES[current];
+            gif.onload = () => {
+                timer = setTimeout(() => {
+                    gif.style.display = "none";
+                    canvas.style.display = "block";
+                    playing = false;
+                }, slide.duration);
+            };
+            gif.src = slide.url + "?t=" + Date.now(); // запуск с начала
+            gif.style.display = "block";
+            canvas.style.display = "none";
+        }
+
+        canvas.addEventListener("click", (e) => {
+            const p = toImageCoords(e.clientX, e.clientY);
+
+            if (DEBUG) {
+                const text = `x: ${p.x.toFixed(2)}, y: ${p.y.toFixed(2)}`;
+                debugBox.textContent = "клик: " + text;
+                console.log(text);
+            }
+
+            // попали ли в одну из областей текущего слайда
+            const spots = SLIDES[current].spots || [];
+            const hit = spots.find(s =>
+                p.x >= s.x && p.x <= s.x + s.w &&
+                p.y >= s.y && p.y <= s.y + s.h
+            );
+
+            if (hit) {
+                showPopup(hit);
+            } else {
+                playGif();
+            }
+        });
+
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "ArrowRight") go(1);
+            if (e.key === "ArrowLeft") go(-1);
+        });
+        prevBtn.addEventListener("click", () => go(-1));
+        nextBtn.addEventListener("click", () => go(1));
+
+        show(0);
+    </script>
+</body>
+
+</html>
